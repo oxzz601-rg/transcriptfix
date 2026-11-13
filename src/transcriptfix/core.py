@@ -18,7 +18,8 @@ TIMESTAMP = re.compile(
 )
 TAG = re.compile(r"<[^>]+>")
 ANNOTATION = re.compile(
-    r"[\[(](?:[^\])]*?(?:music|laughs?|applause|inaudible|crosstalk|silence)[^\])]*?[\])]", re.IGNORECASE
+    r"[\[(][^\[\]()]*(?:music|laughs?|applause|inaudible|crosstalk|silence)[^\[\]()]*[\])]",
+    re.IGNORECASE,
 )
 FILLERS = re.compile(r"\b(?:um+|uh+|erm+|hmm+|mm+|mhm+)\b[,.]?", re.IGNORECASE)
 SPEAKER_PREFIX = re.compile(
@@ -34,6 +35,32 @@ STOPWORDS = set(
     "under until up very was we were what when where which while who whom why will with would you your yours "
     "yourself yourselves going get got also really thing things think know like okay yeah right want lot actually".split()
 )
+
+
+class Cue:
+    __slots__ = ("start", "end", "text", "speaker")
+
+    def __init__(self, start, end, text, speaker=""):
+        self.start = float(start)
+        self.end = float(end)
+        self.text = text
+        self.speaker = speaker
+
+    def __repr__(self):
+        return "Cue({:.2f}, {:.2f}, {!r}, {!r})".format(self.start, self.end, self.text[:30], self.speaker)
+
+
+class Paragraph:
+    __slots__ = ("start", "end", "speaker", "text")
+
+    def __init__(self, start, end, speaker, text):
+        self.start = start
+        self.end = end
+        self.speaker = speaker
+        self.text = text
+
+    def to_dict(self):
+        return {"start": round(self.start, 2), "speaker": self.speaker, "text": self.text}
 
 
 class Transcript:
@@ -67,32 +94,6 @@ class Transcript:
         }
 
 
-class Cue:
-    __slots__ = ("start", "end", "text", "speaker")
-
-    def __init__(self, start, end, text, speaker=""):
-        self.start = float(start)
-        self.end = float(end)
-        self.text = text
-        self.speaker = speaker
-
-    def __repr__(self):
-        return "Cue({:.2f}, {:.2f}, {!r}, {!r})".format(self.start, self.end, self.text[:30], self.speaker)
-
-
-class Paragraph:
-    __slots__ = ("start", "end", "speaker", "text")
-
-    def __init__(self, start, end, speaker, text):
-        self.start = start
-        self.end = end
-        self.speaker = speaker
-        self.text = text
-
-    def to_dict(self):
-        return {"start": round(self.start, 2), "speaker": self.speaker, "text": self.text}
-
-
 def parse_timestamp(text):
     parts = text.replace(",", ".").split(":")
     if len(parts) == 3:
@@ -104,13 +105,12 @@ def parse_timestamp(text):
 
 def parse_srt(text):
     cues = []
-    blocks = re.split(r"\n\s*\n", text.replace("\r\n", "\n").strip())
-    for block in blocks:
+    for block in re.split(r"\n\s*\n", text.replace("\r\n", "\n").strip()):
         lines = [line for line in block.splitlines() if line.strip()]
         if not lines:
             continue
-        stamp_at = None
         match = None
+        stamp_at = None
         for index, line in enumerate(lines[:2]):
             match = TIMESTAMP.search(line)
             if match:
@@ -118,8 +118,8 @@ def parse_srt(text):
                 break
         if not match or stamp_at is None:
             continue
-        body = " ".join(lines[stamp_at + 1 :])
-        cues.append(Cue(parse_timestamp(match.group("start")), parse_timestamp(match.group("end")), body.strip()))
+        body = " ".join(lines[stamp_at + 1 :]).strip()
+        cues.append(Cue(parse_timestamp(match.group("start")), parse_timestamp(match.group("end")), body))
     return cues
 
 
@@ -155,16 +155,15 @@ def parse_vtt(text):
 
 def parse_whisper(text):
     data = json.loads(text)
-    cues = []
-    for segment in data.get("segments") or []:
-        cues.append(
-            Cue(
-                segment.get("start", 0.0),
-                segment.get("end", 0.0),
-                str(segment.get("text", "")).strip(),
-                str(segment.get("speaker", "") or "").strip(),
-            )
+    cues = [
+        Cue(
+            segment.get("start", 0.0),
+            segment.get("end", 0.0),
+            str(segment.get("text", "")).strip(),
+            str(segment.get("speaker", "") or "").strip(),
         )
+        for segment in data.get("segments") or []
+    ]
     if not cues and data.get("text"):
         cues.append(Cue(0.0, 0.0, str(data["text"]).strip()))
     return cues
@@ -202,8 +201,7 @@ def _strip_speaker(text):
     match = SPEAKER_PREFIX.match(text)
     if not match:
         return "", text
-    name = match.group("name").strip("[]").strip()
-    return name, text[match.end() :].strip()
+    return match.group("name").strip("[]").strip(), text[match.end() :].strip()
 
 
 def clean(cues, remove_fillers=True, keep_annotations=False, merge_gap=2.5, dedupe=True):
@@ -246,8 +244,8 @@ def clean(cues, remove_fillers=True, keep_annotations=False, merge_gap=2.5, dedu
     for cue in prepared:
         if paragraphs:
             current = paragraphs[-1]
-            # An unlabelled cue never inherits or steals a speaker: only identical
-            # speaker labels may continue a paragraph.
+            # Only identical speaker labels continue a paragraph: an unlabelled cue
+            # never inherits or steals a speaker.
             same_speaker = current.speaker == cue.speaker
             close_enough = cue.start - current.end <= merge_gap
             if same_speaker and close_enough and not SENTENCE_END.search(current.text + " "):
@@ -276,17 +274,15 @@ def keywords(paragraphs, limit=12):
 def chapters(paragraphs, every=300.0):
     """Group paragraphs into sections by elapsed time, titled from their first words."""
     groups = []
-    current = []
     start = None
+    current = []
     for paragraph in paragraphs:
         if start is None:
-            start = paragraph.start
-            current = [paragraph]
+            start, current = paragraph.start, [paragraph]
             continue
         if paragraph.start - start >= every:
             groups.append((start, current))
-            start = paragraph.start
-            current = [paragraph]
+            start, current = paragraph.start, [paragraph]
         else:
             current.append(paragraph)
     if current:
