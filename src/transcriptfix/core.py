@@ -17,7 +17,9 @@ TIMESTAMP = re.compile(
     r"(?P<end>\d{1,2}:\d{2}:\d{2}[,.]\d{1,3}|\d{1,2}:\d{2}[,.]\d{1,3})"
 )
 TAG = re.compile(r"<[^>]+>")
-ANNOTATION = re.compile(r"[\[(](?:[^\])]*?(?:music|laughs?|applause|inaudible|crosstalk|silence)[^\])]*?[\])]", re.IGNORECASE)
+ANNOTATION = re.compile(
+    r"[\[(](?:[^\])]*?(?:music|laughs?|applause|inaudible|crosstalk|silence)[^\])]*?[\])]", re.IGNORECASE
+)
 FILLERS = re.compile(r"\b(?:um+|uh+|erm+|hmm+|mm+|mhm+)\b[,.]?", re.IGNORECASE)
 SPEAKER_PREFIX = re.compile(
     r"^\s*(?:>>\s*)*(?P<name>(?:SPEAKER|Speaker|speaker)\s*\d+|[A-Z][A-Za-z0-9 .'-]{1,24}|\[[^\]]{1,24}\])\s*:\s*"
@@ -107,38 +109,49 @@ def parse_srt(text):
         lines = [line for line in block.splitlines() if line.strip()]
         if not lines:
             continue
-        match = TIMESTAMP.search(lines[0]) or (TIMESTAMP.search(lines[1]) if len(lines) > 1 else None)
-        if not match:
+        stamp_at = None
+        match = None
+        for index, line in enumerate(lines[:2]):
+            match = TIMESTAMP.search(line)
+            if match:
+                stamp_at = index
+                break
+        if not match or stamp_at is None:
             continue
-        body = " ".join(lines[2:] if TIMESTAMP.search(lines[0]) else lines[2:])
-        if TIMESTAMP.search(lines[0]):
-            body = " ".join(lines[1:])
-        else:
-            body = " ".join(lines[2:])
-        cues.append(Cue(parse_timestamp(match.group("start")), parse_timestamp(match.group("end")), body.strip()))
+        body = " ".join(lines[stamp_at + 1 :])
+        cues.append(
+            Cue(parse_timestamp(match.group("start")), parse_timestamp(match.group("end")), body.strip())
+        )
     return cues
 
 
 def parse_vtt(text):
-    lines = text.replace("\r\n", "\n").splitlines()
     cues = []
     current = None
-    for line in lines:
-        if line.strip().upper().startswith("WEBVTT") or line.startswith("NOTE") or not line.strip():
+
+    def flush():
+        nonlocal current
+        if current is not None and current[2]:
+            cues.append(Cue(current[0], current[1], " ".join(current[2]).strip()))
+        current = None
+
+    for line in text.replace("\r\n", "\n").splitlines():
+        stripped = line.strip()
+        if stripped.upper().startswith("WEBVTT") or stripped.upper().startswith("NOTE"):
+            flush()
+            continue
+        if not stripped:
+            flush()
             continue
         match = TIMESTAMP.search(line)
         if match:
+            flush()
             current = [parse_timestamp(match.group("start")), parse_timestamp(match.group("end")), []]
             continue
-        if current is not None:
-            if line.strip().isdigit() and not current[2]:
-                continue
-            current[2].append(line.strip())
-            if len(current[2]) > 1:
-                cues.append(Cue(current[0], current[1], " ".join(current[2]).strip()))
-                current = None
-    if current is not None:
-        cues.append(Cue(current[0], current[1], " ".join(current[2]).strip()))
+        if current is None or stripped.isdigit():
+            continue
+        current[2].append(stripped)
+    flush()
     return cues
 
 
@@ -160,33 +173,33 @@ def parse_whisper(text):
 
 
 def parse_plain(text):
-    cues = []
-    for line in text.splitlines():
-        if line.strip():
-            cues.append(Cue(0.0, 0.0, line.strip()))
-    return cues
+    return [Cue(0.0, 0.0, line.strip()) for line in text.splitlines() if line.strip()]
 
 
 def detect_format(text, name=""):
     suffix = pathlib.Path(name).suffix.lower()
     stripped = text.lstrip()
-    if suffix in (".vtt",) or stripped.upper().startswith("WEBVTT"):
+    if suffix == ".vtt" or stripped.upper().startswith("WEBVTT"):
         return "vtt"
-    if suffix in (".json",) or stripped.startswith("{"):
+    if suffix == ".json" or stripped.startswith("{"):
         return "json"
-    if suffix in (".srt",) or "-->" in stripped[:2000]:
+    if suffix == ".srt" or "-->" in stripped[:2000]:
         return "srt"
     return "txt"
+
+
+PARSERS = {"srt": parse_srt, "vtt": parse_vtt, "json": parse_whisper, "txt": parse_plain}
 
 
 def load(path, fmt=None):
     path = pathlib.Path(path)
     text = path.read_text(encoding="utf-8-sig", errors="replace")
     fmt = fmt or detect_format(text, path.name)
-    parsers = {"srt": parse_srt, "vtt": parse_vtt, "json": parse_whisper, "txt": parse_plain}
-    if fmt not in parsers:
+    if fmt not in PARSERS:
         raise ValueError("unknown format {!r}; use srt, vtt, json or txt".format(fmt))
-    return Transcript(parsers[fmt](text), source=path.name, title=path.stem.replace("_", " ").replace("-", " "))
+    return Transcript(
+        PARSERS[fmt](text), source=path.name, title=path.stem.replace("_", " ").replace("-", " ")
+    )
 
 
 def _strip_speaker(text):
@@ -281,8 +294,7 @@ def chapters(paragraphs, every=300.0):
         groups.append((start or 0.0, current))
     result = []
     for start, items in groups:
-        words = items[0].text.split()[:7]
-        title = " ".join(words).rstrip(",.;:!?") or "Section"
+        title = " ".join(items[0].text.split()[:7]).rstrip(",.;:!?") or "Section"
         if len(title) > 58:
             title = title[:55].rstrip() + "..."
         result.append((start, title, items))
@@ -296,13 +308,11 @@ def clock(seconds):
 
 def render_markdown(transcript, paragraphs, title=None, chapter_every=300.0, timestamps=True, keyword_limit=12):
     lines = ["# {}".format(title or transcript.title or "Transcript"), ""]
-    minutes = transcript.duration / 60.0 if transcript.duration else 0
     meta = ["source `{}`".format(transcript.source or "stdin")]
     if transcript.duration:
         meta.append(clock(transcript.duration))
     meta.append("{} words".format(transcript.words))
-    if minutes:
-        meta.append("~{:.0f} min read".format(transcript.words / 200.0))
+    meta.append("~{:.0f} min read".format(transcript.words / 200.0))
     if transcript.speakers:
         meta.append("{} speaker(s)".format(len(transcript.speakers)))
     lines.append("> {}".format(" | ".join(meta)))
@@ -317,9 +327,12 @@ def render_markdown(transcript, paragraphs, title=None, chapter_every=300.0, tim
         lines.append("## {}".format("[{}] {}".format(clock(start), heading) if timestamps else heading))
         lines.append("")
         for paragraph in items:
-            prefix = "**{}:** ".format(paragraph.speaker) if paragraph.speaker else ""
-            if timestamps and not paragraph.speaker:
+            if paragraph.speaker:
+                prefix = "**{}:** ".format(paragraph.speaker)
+            elif timestamps:
                 prefix = "`[{}]` ".format(clock(paragraph.start))
+            else:
+                prefix = ""
             lines.append("{}{}".format(prefix, paragraph.text))
             lines.append("")
     return "\n".join(lines).rstrip() + "\n"
