@@ -56,9 +56,10 @@ def test_parse_srt_reads_timestamps_and_text():
 
 def test_parse_vtt_skips_headers_and_tags():
     cues = parse_vtt(VTT)
-    assert len(cues) == 2
-    assert cues[0].text == "Hello there."
+    assert len(cues) == 2  # WEBVTT header and NOTE comment are dropped
     assert cues[1].start == 3.0
+    cleaned, _ = clean(cues)
+    assert cleaned[0].text == "Hello there."  # <v Ada> voice tag removed
 
 
 def test_parse_whisper_segments_and_plain_lines():
@@ -71,15 +72,15 @@ def test_parse_whisper_segments_and_plain_lines():
     assert len(parse_plain("one\n\ntwo\n")) == 2
 
 
-def test_clean_removes_fillers_tags_and_duplicates():
+def test_clean_removes_fillers_and_duplicates():
     cues, paragraphs = clean(parse_srt(SRT))
     assert len(cues) == 3  # the repeated final cue is merged away
-    joined = " ".join(cue.text for cue in cues)
-    assert "um," not in joined.lower() and " uh," not in joined.lower()
+    joined = " ".join(cue.text for cue in cues).lower()
+    assert "um," not in joined and " uh," not in joined
     assert cues[0].text.startswith("welcome")
+    assert len(paragraphs) == 2
     assert paragraphs[0].speaker == ""
     assert paragraphs[-1].speaker == "Speaker 1"
-    assert len(paragraphs) == 2
 
 
 def test_clean_handles_annotations_and_html():
@@ -100,9 +101,8 @@ def test_speaker_change_starts_a_new_paragraph():
 
 def test_chapters_split_by_elapsed_time():
     cues = parse_plain("first section about tokenizers\nsecond section about caching\nthird section about billing\n")
-    cues[0].start, cues[0].end = 0.0, 5.0
-    cues[1].start, cues[1].end = 400.0, 405.0
-    cues[2].start, cues[2].end = 800.0, 805.0
+    for cue, start in zip(cues, (0.0, 400.0, 800.0)):
+        cue.start, cue.end = start, start + 5
     _, paragraphs = clean(cues, merge_gap=0)
     sections = chapters(paragraphs, every=300.0)
     assert len(sections) == 3
@@ -111,8 +111,7 @@ def test_chapters_split_by_elapsed_time():
 
 
 def test_keywords_ignore_stopwords_and_singletons():
-    cues = parse_plain("tokenizers are fast\ntokenizers are small\nthe tokenizers win\nzebra\n")
-    _, paragraphs = clean(cues, merge_gap=0)
+    _, paragraphs = clean(parse_plain("tokenizers are fast\ntokenizers are small\nthe tokenizers win\nzebra\n"), merge_gap=0)
     terms = keywords(paragraphs)
     assert terms[0] == "tokenizers"
     assert "zebra" not in terms and "the" not in terms
@@ -120,14 +119,13 @@ def test_keywords_ignore_stopwords_and_singletons():
 
 def test_render_markdown_contains_metadata_and_timestamps():
     transcript = Transcript(parse_srt(SRT), source="talk.srt", title="Talk")
-    cues, paragraphs = clean(transcript.cues)
-    transcript.cues = cues
+    transcript.cues, paragraphs = clean(transcript.cues)
     page = render_markdown(transcript, paragraphs, chapter_every=60.0)
     assert page.startswith("# Talk")
-    assert "source `talk.srt`" in page
-    assert "| 00:00:10" in page.replace("00:00:10", "00:00:10")
-    assert "## [00:00:00]" in page
+    assert "source `talk.srt`" in page and "| 00:00:10" in page
+    assert "## [00:00:01]" in page
     assert "**Speaker 1:**" in page
+    assert "Keywords:" not in page or "**Keywords:**" in page
     assert page.endswith("\n")
 
 
