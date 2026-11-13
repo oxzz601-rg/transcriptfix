@@ -119,9 +119,7 @@ def parse_srt(text):
         if not match or stamp_at is None:
             continue
         body = " ".join(lines[stamp_at + 1 :])
-        cues.append(
-            Cue(parse_timestamp(match.group("start")), parse_timestamp(match.group("end")), body.strip())
-        )
+        cues.append(Cue(parse_timestamp(match.group("start")), parse_timestamp(match.group("end")), body.strip()))
     return cues
 
 
@@ -197,9 +195,7 @@ def load(path, fmt=None):
     fmt = fmt or detect_format(text, path.name)
     if fmt not in PARSERS:
         raise ValueError("unknown format {!r}; use srt, vtt, json or txt".format(fmt))
-    return Transcript(
-        PARSERS[fmt](text), source=path.name, title=path.stem.replace("_", " ").replace("-", " ")
-    )
+    return Transcript(PARSERS[fmt](text), source=path.name, title=path.stem.replace("_", " ").replace("-", " "))
 
 
 def _strip_speaker(text):
@@ -211,7 +207,7 @@ def _strip_speaker(text):
 
 
 def clean(cues, remove_fillers=True, keep_annotations=False, merge_gap=2.5, dedupe=True):
-    """Normalise cue text and drop the rolling duplicates captions produce."""
+    """Normalise cue text, drop rolling duplicates, then group cues into paragraphs."""
     prepared = []
     for cue in cues:
         text = html.unescape(TAG.sub(" ", cue.text or "")).replace("\u200b", " ")
@@ -250,12 +246,15 @@ def clean(cues, remove_fillers=True, keep_annotations=False, merge_gap=2.5, dedu
     for cue in prepared:
         if paragraphs:
             current = paragraphs[-1]
-            same_speaker = current.speaker == cue.speaker or not (current.speaker and cue.speaker)
-            if same_speaker and cue.start - current.end <= merge_gap and not SENTENCE_END.search(current.text + " "):
+            # An unlabelled cue never inherits or steals a speaker: only identical
+            # speaker labels may continue a paragraph.
+            same_speaker = current.speaker == cue.speaker
+            close_enough = cue.start - current.end <= merge_gap
+            if same_speaker and close_enough and not SENTENCE_END.search(current.text + " "):
                 current.text = (current.text + " " + cue.text).strip()
                 current.end = cue.end
                 continue
-            if same_speaker and cue.start - current.end <= merge_gap and len(current.text.split()) < 12:
+            if same_speaker and close_enough and len(current.text.split()) < 12:
                 current.text = (current.text + " " + cue.text).strip()
                 current.end = cue.end
                 continue
@@ -275,7 +274,7 @@ def keywords(paragraphs, limit=12):
 
 
 def chapters(paragraphs, every=300.0):
-    """Group paragraphs into sections by elapsed time, with a title from the first words."""
+    """Group paragraphs into sections by elapsed time, titled from their first words."""
     groups = []
     current = []
     start = None
