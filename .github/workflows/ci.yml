@@ -1,4 +1,4 @@
-name: CI
+name: ci
 
 on:
   push:
@@ -7,7 +7,8 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Ubuntu 24.04 on purpose: setup-python has no 3.9 build for ubuntu-26.04 yet.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
